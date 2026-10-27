@@ -1,3 +1,4 @@
+import { createLessonService } from './lesson-service.js';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -30,6 +31,7 @@ async function body(req){let raw='';for await(const chunk of req){raw+=chunk;if(
 const attempts=new Map();
 function rateLimit(req){const key=req.socket.remoteAddress;const now=Date.now();for(const [k,v] of attempts)if(v.until<now)attempts.delete(k);let a=attempts.get(key);if(!a){a={n:0,until:now+15*60000};attempts.set(key,a);}if(++a.n>30)fail('로그인 시도가 너무 많습니다. 15분 뒤 다시 시도해주세요.',429);}
 function transaction(fn){db.exec('BEGIN IMMEDIATE');try{const value=fn();db.exec('COMMIT');return value;}catch(e){db.exec('ROLLBACK');throw e;}}
+const lessonService=createLessonService({db,rows,row,fail,transaction});
 const server=http.createServer(async(req,res)=>{
  try{
  const url=new URL(req.url,'http://localhost');const path=url.pathname;
@@ -57,10 +59,11 @@ const server=http.createServer(async(req,res)=>{
  const match=(req.headers.cookie||'').match(/center_session=([a-f0-9]{64})/);if(match)db.prepare('DELETE FROM sessions WHERE token=?').run(digest(match[1]));res.setHeader('Set-Cookie','center_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');return json(res,200,{});
  }
  const auth=session(req);if(!auth)fail('로그인이 필요합니다.',401);
+ if(/^\/api\/(portal\/)?(?:scheduling|lesson-(?:slots|requests)(?:\/\d+)?)$/.test(path)){await lessonService.handle(req,path,auth,body,json,res);return;}
  if(path.startsWith('/api/portal/')){
  if(auth.role!=='member')fail('회원 계정으로 로그인해주세요.',403);
  const member=row('members',auth.member_id);
- if(path==='/api/portal/me'&&req.method==='GET')return json(res,200,{id:member.id,name:member.name});
+ if(path==='/api/portal/me'&&req.method==='GET')return json(res,200,{id:member.id,name:member.name,isCoach:member.type==='코치'});
  if(path==='/api/portal/events'&&req.method==='GET'){
  const own=new Set(db.prepare('SELECT event_id FROM registrations WHERE member_id=?').all(member.id).map(r=>r.event_id));
  return json(res,200,rows('events').map(r=>({...r,registeredCount:count(r.id),applied:own.has(r.id),started:r.date<=seoulNow()})));
@@ -104,13 +107,14 @@ const server=http.createServer(async(req,res)=>{
  const [, ,kind,id]=path.split('/');if(!kinds.has(kind))fail('없는 항목입니다.',404);
  if(req.method==='GET')return json(res,200,rows(kind).map(r=>kind==='members'?{...r,loginEnabled:!!db.prepare('SELECT member_id FROM member_auth WHERE member_id=?').get(r.id)}:r));
  if(req.method==='DELETE'&&/^\d+$/.test(id)){
- row(kind,Number(id));transaction(()=>{db.prepare('DELETE FROM records WHERE kind=? AND id=?').run(kind,Number(id));if(kind==='events')db.prepare('DELETE FROM registrations WHERE event_id=?').run(Number(id));if(kind==='members'){db.prepare('DELETE FROM registrations WHERE member_id=?').run(Number(id));db.prepare('DELETE FROM member_auth WHERE member_id=?').run(Number(id));db.prepare('DELETE FROM sessions WHERE member_id=?').run(Number(id));}});return json(res,200,{});
+ row(kind,Number(id));if(kind==='members')lessonService.guardMemberChange(Number(id),null,true);transaction(()=>{db.prepare('DELETE FROM records WHERE kind=? AND id=?').run(kind,Number(id));if(kind==='events')db.prepare('DELETE FROM registrations WHERE event_id=?').run(Number(id));if(kind==='members'){lessonService.removeMember(Number(id));db.prepare('DELETE FROM registrations WHERE member_id=?').run(Number(id));db.prepare('DELETE FROM member_auth WHERE member_id=?').run(Number(id));db.prepare('DELETE FROM sessions WHERE member_id=?').run(Number(id));}});return json(res,200,{});
  }
  if(req.method==='POST'||req.method==='PUT'){
  const b=await body(req);delete b.id;delete b.loginEnabled;const password=b.loginPassword;delete b.loginPassword;
  if(!Object.values(b).some(v=>String(v).trim()))fail('내용을 입력해주세요.');
  if(req.method==='PUT'){if(!/^\d+$/.test(id))fail('잘못된 번호입니다.');row(kind,Number(id));}
  if(kind==='members'){
+ if(id)lessonService.guardMemberChange(Number(id),b.type);
  if(password)validPassword(password);
  if(b.phone&&rows('members').some(m=>m.id!==Number(id)&&phone(m.phone)===phone(b.phone)))fail('이미 등록된 전화번호입니다.');
  if(password&&(!b.phone||phone(b.phone).length<9))fail('로그인용 전화번호를 입력해주세요.');
@@ -125,7 +129,7 @@ const server=http.createServer(async(req,res)=>{
  }
  fail('허용되지 않는 요청입니다.',405);
  }
- const files={'/':'index.html','/member':'member.html','/member/':'member.html','/login':'login.html','/app.js':'app.js','/member.js':'member.js','/login.js':'login.js','/calendar.js':'calendar.js','/style.css':'style.css'};
+ const files={'/':'index.html','/member':'member.html','/member/':'member.html','/login':'login.html','/app.js':'app.js','/member.js':'member.js','/login.js':'login.js','/calendar.js':'calendar.js','/lesson-ui.js':'lesson-ui.js','/style.css':'style.css'};
  const file=files[path];if(!file){res.writeHead(404);return res.end('Not found');}
  res.setHeader('Content-Type',file.endsWith('.js')?'text/javascript; charset=utf-8':file.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8');res.end(readFileSync(root+'public/'+file));
  }catch(e){json(res,e.status||400,{error:e.status?e.message:'요청을 처리하지 못했습니다. 입력 내용을 확인해주세요.'});}

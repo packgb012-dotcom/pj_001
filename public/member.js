@@ -1,15 +1,21 @@
+import { mountLessonUI } from './lesson-ui.js';
 import {seoulToday,monthCells,shiftMonth,eventsOnDate} from './calendar.js';
 const $=s=>document.querySelector(s);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let currentMember=null;
 let events=[],view='events',selectedId=null,busy=false;
 let [year,month]=seoulToday().split('-').slice(0,2).map(Number);month--;
-async function api(path,method='GET'){
- const response=await fetch('/api/'+path,{method,headers:{'Content-Type':'application/json'},...(method==='POST'?{body:'{}'}:{})});
+async function api(path,method='GET',payload={}){
+ const response=await fetch('/api/'+path,{method,headers:{'Content-Type':'application/json'},...(['POST','PUT'].includes(method)?{body:JSON.stringify(payload)}:{})});
  const result=await response.json();if(response.status===401){location.replace('/login');throw Error('다시 로그인해주세요.');}if(!response.ok)throw Error(result.error||'요청에 실패했습니다.');return result;
 }
-async function refresh(){events=await api('portal/events');render();}
+async function refresh(){if(view!=='lessons')events=await api('portal/events');render();}
 function status(event){return event.applied?'신청완료':event.started?'신청종료':event.registeredCount>=Number(event.capacity)?'정원마감':'신청가능';}
 function render(){
+ document.querySelector('.member-main h1').textContent=view==='lessons'?'레슨 신청·시간표':'함께하는 대회·행사';
+ document.querySelector('.page-heading p').textContent=view==='lessons'?'코치의 가능한 시간을 선택하고 신청·수락 현황을 확인하세요.':'참가할 대회를 찾아 신청하고, 내 일정을 확인하세요.';
+ $('[data-view=lessons]').classList.toggle('selected',view==='lessons');
+ if(view==='lessons'){$('[data-view=events]').classList.remove('selected');$('[data-view=mine]').classList.remove('selected');$('#member-content').innerHTML='<div id="member-lesson-workspace"></div>';mountLessonUI($('#member-lesson-workspace'),{api,memberId:currentMember?.id});return;}
  $('[data-view=events]').classList.toggle('selected',view==='events');$('[data-view=mine]').classList.toggle('selected',view==='mine');
  if(view==='mine'){const own=events.filter(e=>e.applied);const visible=own.filter(e=>e.date?.startsWith(`${year}-${String(month+1).padStart(2,'0')}-`));$('#member-content').innerHTML=`<section class="panel calendar-panel"><div class="panel-top calendar-top"><div><h2 id="member-calendar-title" tabindex="-1">내 신청 캘린더 · ${year}년 ${month+1}월</h2><p>이 달의 신청 ${visible.length}건 · 한국 시간 기준</p></div><div class="calendar-controls"><button class="secondary" data-month="-1" aria-label="이전 달">‹</button><button class="secondary" data-today>오늘</button><button class="secondary" data-month="1" aria-label="다음 달">›</button></div></div><div class="calendar-week" aria-hidden="true">${['일','월','화','수','목','금','토'].map(d=>`<span>${d}</span>`).join('')}</div><div class="calendar-grid">${monthCells(year,month).map(date=>date?`<div class="calendar-day ${date===seoulToday()?'is-today':''}" aria-label="${date}"><time datetime="${date}">${Number(date.slice(8))}</time>${eventsOnDate(own,date).map(e=>`<button class="calendar-event" data-event="${e.id}" aria-label="${esc(date+' '+e.name+' 참가 신청 '+e.registeredCount+'명 / 정원 '+e.capacity+'명 상세보기')}"><span>${esc(e.date.slice(11,16))}</span><strong>${esc(e.name)}</strong><small class="calendar-participants">참가 ${e.registeredCount} / ${esc(e.capacity)}명</small></button>`).join('')}</div>`:'<div class="calendar-day outside" aria-hidden="true"></div>').join('')}</div>${visible.length?'':'<p class="calendar-no-events">이번 달에 신청한 대회가 없습니다. 전체 대회에서 신청하거나 다른 달을 확인하세요.</p>'}</section>`;return;}
  const sorted=[...events].sort((a,b)=>Number(a.started)-Number(b.started)||a.date.localeCompare(b.date));
@@ -39,5 +45,5 @@ $('#logout').onclick=async()=>{try{await api('auth/logout','POST');location.repl
 try{
  const s=await api('auth/status');if(s.role==='admin'){$('#member-name').textContent='관리자 접속 중';$('#member-content').innerHTML='<div class="panel empty"><h3>회원 계정으로 로그인해주세요.</h3><p>회원용 접속 주소는 현재 주소의 /member입니다.<br>회원 화면을 테스트하려면 관리자 화면에서 전화번호와 비밀번호를 등록한 뒤 로그아웃하세요.</p><a href="/">관리자 화면으로 돌아가기</a></div>';}
  else if(s.role!=='member')location.replace('/login');
- else{const member=await api('portal/me');$('#member-name').textContent=member.name+'님';await refresh();}
+ else{const member=await api('portal/me');currentMember=member;$('#member-name').textContent=member.name+(member.isCoach?' 코치님':'님');if(member.isCoach)$('[data-view=lessons]').textContent='레슨·코치 수락 관리';await refresh();}
 }catch(e){$('#member-error').textContent=e.message;}
